@@ -1,4 +1,7 @@
 param location string = resourceGroup().location
+
+param deployArcWebhook bool = true
+
 param windowsServerLogicAppWebhookName string = 'la-arc-sa-windows-webhook'
 param windowsServerLogicAppScheduledName string = 'la-arc-sa-windows-scheduled'
 param sqlServerLogicAppScheduledName string = 'la-arc-sa-sql-scheduled'
@@ -10,35 +13,6 @@ param arcSubscriptions array = []
 resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2018-11-30' = {
   name: 'mi-arc-logicapps'
   location: location
-}
-
-// 1. Create Integration Account
-resource integrationAccount 'Microsoft.Logic/integrationAccounts@2019-05-01' = {
-  name: integrationAccountName
-  location: location
-  sku: {
-    name: 'Free'
-  }
-  properties: {}
-}
-
-// 2. Create the Logic App
-resource webhookLogicApp 'Microsoft.Logic/workflows@2019-05-01' = {
-  name: windowsServerLogicAppWebhookName
-  location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${managedIdentity.id}': {}
-    }
-  }
-  properties: {
-    integrationAccount: {
-      id: integrationAccount.id
-    }
-
-    definition: loadJsonContent('logicApps/sa-server-webhook.json', 'definition')
-  }
 }
 
 resource scheduledLogicApp 'Microsoft.Logic/workflows@2019-05-01' = {
@@ -69,9 +43,35 @@ resource scheduledSqlLogicApp 'Microsoft.Logic/workflows@2019-05-01' = {
   }
 }
 
-// 3. Create the Event Grid System Topic for the Resource Group
+resource integrationAccount 'Microsoft.Logic/integrationAccounts@2019-05-01' = if (deployArcWebhook) {
+  name: integrationAccountName
+  location: location
+  sku: {
+    name: 'Free'
+  }
+  properties: {}
+}
+
+resource webhookLogicApp 'Microsoft.Logic/workflows@2019-05-01' = if (deployArcWebhook) {
+  name: windowsServerLogicAppWebhookName
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${managedIdentity.id}': {}
+    }
+  }
+  properties: {
+    integrationAccount: {
+      id: integrationAccount.id
+    }
+
+    definition: loadJsonContent('logicApps/sa-server-webhook.json', 'definition')
+  }
+}
+
 resource systemTopic 'Microsoft.EventGrid/systemTopics@2021-12-01' = [
-  for subscriptionId in arcSubscriptions: {
+  for subscriptionId in arcSubscriptions: if (deployArcWebhook) {
     name: 'st-arc-resource-events-${subscriptionId}'
     location: 'global'
     properties: {
@@ -81,16 +81,14 @@ resource systemTopic 'Microsoft.EventGrid/systemTopics@2021-12-01' = [
   }
 ]
 
-// 4. Create the Event Grid Subscription
 resource eventSubscription 'Microsoft.EventGrid/systemTopics/eventSubscriptions@2021-12-01' = [
-  for (subscriptionId, index) in arcSubscriptions: {
+  for (subscriptionId, index) in arcSubscriptions: if (deployArcWebhook) {
     parent: systemTopic[index]
     name: 'sub-arc-machines-creation-${subscriptionId}'
     properties: {
       destination: {
         endpointType: 'WebHook'
         properties: {
-          // Logic App trigger URL is required for WebHook destination
           endpointUrl: listCallbackUrl('${webhookLogicApp.id}/triggers/When_a_resource_event_occurs', '2016-06-01').value
         }
       }
@@ -120,7 +118,6 @@ resource eventSubscription 'Microsoft.EventGrid/systemTopics/eventSubscriptions@
   }
 ]
 
-// 5. Grant Azure Connected Machine Resource Administrator role to Logic App managed identity
 var azureConnectedMachineResourceAdminRoleId = 'cd570a14-e51a-42ad-bac8-bafd67325302'
 resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(resourceGroup().id, webhookLogicApp.id, azureConnectedMachineResourceAdminRoleId)
